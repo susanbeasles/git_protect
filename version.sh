@@ -1,86 +1,128 @@
 #!/usr/bin/env bash
-# Unit tests for scripts/version.sh in throwaway git repos.
-set +e
-SRC="$(cd "$(dirname "$0")/.." || exit 1; pwd -P)"
-W="/tmp/cfez-ver-$$"; mkdir -p "$W"
-trap 'rm -rf "$W"' EXIT
-fail=0
-t() { printf '  %-52s ' "$1"; }
-eq() { t "$1"; if [ "$2" = "$3" ]; then echo PASS; else echo FAIL; echo "      want [$3] got [$2]"; fail=1; fi; }
+# Derive the next semantic version from commits since the last release tag.
+#
+# Rules (conventional commits). First match wins, highest bump wins:
+#   BREAKING CHANGE: in body, or a `!` before the colon  -> major
+#   feat:                                                -> minor
+#   fix: | perf: | refactor: | revert:                   -> patch
+#   anything else (chore, docs, test, ci, build, style)  -> no bump on its own
+#
+# If there are only no-bump commits, this emits a patch bump — a release still
+# needs a version, and silently reusing one is worse.
+#
+# Usage:
+#   scripts/version.sh next            -> 1.4.0
+#   scripts/version.sh next --tag      -> v1.4.0
+#   scripts/version.sh current         -> 1.3.2   (last released, or 0.0.0)
+#   scripts/version.sh bump            -> major|minor|patch
+#   scripts/version.sh notes           -> grouped markdown changelog
+#   scripts/version.sh --range A..B …  -> override the commit range
+set -euo pipefail
 
-newrepo() {
-  local d="$W/$1"; mkdir -p "$d"; cd "$d" || exit 1
-  git init -q; git config user.email t@t.invalid; git config user.name T
-  git config commit.gpgsign false
-  cp "$SRC/scripts/version.sh" .; chmod +x version.sh
+TAG_PREFIX="${TAG_PREFIX:-v}"
+RANGE=""
+
+# ---- arg parsing -----------------------------------------------------------
+CMD=""
+while [ $# -gt 0 ]; do
+  case "$1" in
+    --range) RANGE="$2"; shift 2 ;;
+    --prefix) TAG_PREFIX="$2"; shift 2 ;;
+    --tag) WANT_TAG=1; shift ;;
+    next|current|bump|notes) CMD="$1"; shift ;;
+    *) echo "version.sh: unknown argument '$1'" >&2; exit 2 ;;
+  esac
+done
+CMD="${CMD:-next}"
+
+# ---- last released version -------------------------------------------------
+# Sorted by version, not by date: a hotfix tagged later must not become "latest".
+last_tag() {
+  git tag --list "${TAG_PREFIX}[0-9]*.[0-9]*.[0-9]*" --sort=-version:refname \
+    | head -n1
 }
-c() { git commit -q --allow-empty -m "$1"; }
 
-newrepo a; c "chore: init"; git tag v1.2.3
-eq "current version from the newest tag"      "$(./version.sh current)" "1.2.3"
-eq "no bumpable commits still yields a patch" "$(./version.sh next)"    "1.2.4"
-c "docs: x";  eq "docs alone is a patch"      "$(./version.sh next)"    "1.2.4"
-c "fix: y";   eq "fix is a patch"             "$(./version.sh bump)"    "patch"
-c "feat: z";  eq "feat outranks fix"          "$(./version.sh bump)"    "minor"
-eq "minor resets the patch component"         "$(./version.sh next)"    "1.3.0"
-c "feat!: b"; eq "bang outranks feat"         "$(./version.sh bump)"    "major"
-eq "major resets minor and patch"             "$(./version.sh next)"    "2.0.0"
-eq "tag form adds the prefix"                 "$(./version.sh next --tag)" "v2.0.0"
+current_version() {
+  local t; t="$(last_tag || true)"
+  if [ -z "$t" ]; then printf '0.0.0'; else printf '%s' "${t#"$TAG_PREFIX"}"; fi
+}
 
-newrepo b; c "chore: init"; git tag v3.1.4
-git commit -q --allow-empty -m "refactor: rework
+commit_range() {
+  if [ -n "$RANGE" ]; then printf '%s' "$RANGE"; return; fi
+  local t; t="$(last_tag || true)"
+  if [ -z "$t" ]; then printf 'HEAD'; else printf '%s..HEAD' "$t"; fi
+}
 
-BREAKING CHANGE: removed a flag"
-eq "BREAKING CHANGE footer is a major"        "$(./version.sh bump)"    "major"
+# ---- bump detection --------------------------------------------------------
+detect_bump() {
+  local range major=0 minor=0 patch=0 subject body
+  range="$(commit_range)"
 
-newrepo c; c "chore: init"; git tag v0.3.1; c "feat!: big"
-eq "pre-1.0 breaking bumps the minor"         "$(./version.sh next)"    "0.4.0"
+  while IFS= read -r sha; do
+    [ -z "$sha" ] && continue
+    subject="$(git log -1 --format=%s "$sha")"
+    body="$(git log -1 --format=%B "$sha")"
 
-newrepo d; c "feat: first"
-eq "untagged repo has no current version"     "$(./version.sh current)" "0.0.0"
-eq "untagged repo first release"              "$(./version.sh next)"    "0.1.0"
+    # `!` before the colon, or a BREAKING CHANGE / BREAKING-CHANGE footer
+    if printf '%s' "$subject" | grep -qE '^[a-zA-Z]+(\([^)]*\))?!:' \
+       || printf '%s' "$body" | grep -qE '^BREAKING[ -]CHANGE:'; then
+      major=1; continue
+    fi
+    if printf '%s' "$subject" | grep -qE '^feat(\([^)]*\))?:'; then minor=1; continue; fi
+    if printf '%s' "$subject" | grep -qE '^(fix|perf|refactor|revert)(\([^)]*\))?:'; then patch=1; fi
+  done < <(git rev-list --no-merges "$range" 2>/dev/null || true)
 
-newrepo e; c "chore: init"; git tag v0.9.0; git tag v0.10.0
-eq "tags sort by version, not lexically"      "$(./version.sh current)" "0.10.0"
+  if [ "$major" -eq 1 ]; then printf 'major'
+  elif [ "$minor" -eq 1 ]; then printf 'minor'
+  elif [ "$patch" -eq 1 ]; then printf 'patch'
+  else printf 'patch'; fi
+}
 
-newrepo f; c "chore: init"; git tag v1.0.0; c "feat(dns): scoped checks"
-eq "scoped feat is recognised"                "$(./version.sh bump)"    "minor"
-c "fix(http)!: drop retry option"
-eq "scoped bang is recognised"                "$(./version.sh bump)"    "major"
+next_version() {
+  local cur bump major minor patch
+  cur="$(current_version)"
+  bump="$(detect_bump)"
+  IFS=. read -r major minor patch <<<"$cur"
+  major="${major:-0}"; minor="${minor:-0}"; patch="${patch:-0}"
 
-newrepo g; c "chore: init"; git tag v1.0.0
-c "feat: a"; c "fix: b"; c "docs: c"
-notes="$(./version.sh notes)"
-t "notes group features and fixes separately"
-if printf '%s' "$notes" | grep -q '### Features' && printf '%s' "$notes" | grep -q '### Fixes'; then
-  echo PASS; else echo FAIL; fail=1; fi
-t "notes strip the conventional prefix"
-printf '%s' "$notes" | grep -q '^- a ' && echo PASS || { echo FAIL; fail=1; }
+  case "$bump" in
+    major)
+      # 0.x is pre-1.0: a breaking change bumps the minor, per semver §4.
+      if [ "$major" -eq 0 ]; then minor=$((minor + 1)); patch=0
+      else major=$((major + 1)); minor=0; patch=0; fi ;;
+    minor) minor=$((minor + 1)); patch=0 ;;
+    patch) patch=$((patch + 1)) ;;
+  esac
+  printf '%s.%s.%s' "$major" "$minor" "$patch"
+}
 
-# ---- concurrent pull requests ----
-# Two open PRs compute the same "next" version. The release workflow therefore
-# resolves the version at MERGE time against the tags that exist then, and reserves
-# the tag BEFORE moving main. These assertions document why.
-newrepo conc; c "chore: base"; git tag v1.3.0
-git checkout -qb featA 2>/dev/null; c "feat: A"
-va="$(./version.sh next)"
-git checkout -q "$(git rev-list --max-parents=0 HEAD)" 2>/dev/null
-git checkout -qb featB 2>/dev/null; c "feat: B"
-vb="$(./version.sh next)"
-eq "two open branches compute the SAME next version"  "$va" "$vb"
-t "which is why the tag must be reserved at merge, not PR time"
-[ "$va" = "$vb" ] && echo PASS || { echo FAIL; fail=1; }
+# ---- release notes ---------------------------------------------------------
+notes() {
+  local range; range="$(commit_range)"
+  local breaking features fixes other
 
-# After A lands and is tagged, B must resolve to a different version.
-git tag "v$va" featA 2>/dev/null || git tag "v$va"
-vb2="$(./version.sh next)"
-t "after the first release is tagged, the next resolves higher"
-if [ "$vb2" != "$vb" ]; then echo PASS; else echo FAIL; echo "      still $vb2"; fail=1; fi
+  collect() {  # collect <grep-pattern>
+    git log --no-merges --format='%s|%h|%an' "$range" 2>/dev/null \
+      | grep -E "$1" || true
+  }
+  fmt() { sed -E 's#^([a-zA-Z]+)(\([^)]*\))?!?: *#- #; s#\|([0-9a-f]+)\|(.*)$# (\1, \2)#'; }
 
-t "--range scopes the bump to a specific set of commits"
-r="$(./version.sh bump --range "v1.3.0..featB")"
-[ "$r" = "minor" ] && echo PASS || { echo FAIL; echo "      got $r"; fail=1; }
+  breaking="$(collect '^[a-zA-Z]+(\([^)]*\))?!:' | fmt)"
+  features="$(collect '^feat(\([^)]*\))?:' | fmt)"
+  fixes="$(collect '^(fix|perf)(\([^)]*\))?:' | fmt)"
+  other="$(collect '^(refactor|revert|docs|test|ci|build|chore|style)(\([^)]*\))?:' | fmt)"
 
-printf '\n'
-[ "$fail" -eq 0 ] && echo "VERSION TESTS PASS" || echo "VERSION TESTS FAILED"
-exit "$fail"
+  [ -n "$breaking" ] && { printf '### Breaking changes\n\n%s\n\n' "$breaking"; }
+  [ -n "$features" ] && { printf '### Features\n\n%s\n\n' "$features"; }
+  [ -n "$fixes" ]    && { printf '### Fixes\n\n%s\n\n' "$fixes"; }
+  [ -n "$other" ]    && { printf '### Other\n\n%s\n\n' "$other"; }
+  return 0
+}
+
+case "$CMD" in
+  current) current_version; printf '\n' ;;
+  bump)    detect_bump; printf '\n' ;;
+  next)    if [ -n "${WANT_TAG:-}" ]; then printf '%s' "$TAG_PREFIX"; fi
+           next_version; printf '\n' ;;
+  notes)   notes ;;
+esac

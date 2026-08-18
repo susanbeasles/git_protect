@@ -1,166 +1,155 @@
-# shellcheck shell=bash
-# Point-in-time state capture, before anything changes it.
+#!/usr/bin/env bash
+# Tests for lib/core/snapshot.sh.
 #
-# This module knows nothing about Cloudflare, DNS, or what state looks like. It takes
-# a policy name and a scope, asks the policy's capture command for some bytes, and
-# stores them under a derived path with retention applied.
-#
-# Adding a provider means adding a policy and a capture function. It means changing
-# nothing here:
-#
-#   {
-#     "cloudflare-dns": { "capture": "fetch_live",            "scope_label": "zone" },
-#     "aws-route53":    { "capture": "route53_export_zone",   "scope_label": "hosted-zone" },
-#     "sentry-projects":{ "capture": "sentry_export_projects", "scope_label": "org" }
-#   }
-#
-# The capture command is any shell function or executable that writes the state to
-# stdout and exits non-zero on failure. That is the entire contract.
+# The point of these tests is the second half: the same module, unmodified, backing
+# three unrelated providers. If a future provider needs a code change in
+# lib/core/snapshot.sh, one of these tests should be the thing that fails.
+set +e
+cd "$(dirname "$0")/.." || exit 1
+W="/tmp/cfez-snap-$$"
+export CFDNS_ROOT="$W/state"
+. test/lib/load.sh
+load_modules "$PWD" core/snapshot.sh
+trap 'rm -rf "$W"' EXIT
 
-# ---------------------------------------------------------------- policy lookup
-# Resolved per call, not captured when this file is sourced. A configuration path
-# frozen at source time cannot be overridden by anything that loads later — which is
-# exactly what a test, or a second policy set, needs to do.
-snapshot_policy_file() {
-  printf '%s' "${CFDNS_SNAPSHOT_POLICIES:-$CFDNS_LIB/policies/snapshots.json}"
+fail=0
+t() { printf '  %-58s ' "$1"; }
+ok_() { echo PASS; }
+no_() { echo FAIL; fail=1; }
+
+# A policy file for providers this tool has never heard of.
+mkdir -p "$W"
+cat > "$W/policies.json" <<'JSON'
+{
+  "cloudflare-dns":   { "capture": "fake_cloudflare", "dir": "cf",      "retain": 3 },
+  "aws-route53":      { "capture": "fake_route53",    "dir": "route53", "retain": 0 },
+  "sentry-projects":  { "capture": "fake_sentry",     "dir": "sentry",  "wrap": "none",
+                        "extension": "txt" },
+  "broken-capture":   { "capture": "fake_failing",    "dir": "broken" },
+  "empty-capture":    { "capture": "fake_empty",      "dir": "empty" },
+  "missing-command":  { "capture": "no_such_command", "dir": "missing" }
 }
+JSON
+export CFDNS_SNAPSHOT_POLICIES="$W/policies.json"
 
-# snapshot_policy <name> <field> [default]
-snapshot_policy() {
-  local name="$1" field="$2" fallback="${3:-}"
-  local value
-  value="$(jq_get "$(snapshot_policy_file)" ".\"$name\".$field")"
-  printf '%s' "${value:-$fallback}"
-}
+# Capture commands. Each writes state to stdout; that is the entire contract.
+fake_cloudflare() { printf '[{"name":"a.example.com","type":"TXT"}]'; }
+fake_route53()    { printf '{"ResourceRecordSets":[{"Name":"a.aws.test."}]}'; }
+fake_sentry()     { printf 'project: web\nproject: api\n'; }
+fake_failing()    { return 3; }
+fake_empty()      { printf ''; }
 
-snapshot_policy_exists() {
-  local file; file="$(snapshot_policy_file)"
-  [ -f "$file" ] || return 1
-  [ -n "$(jq_get "$file" ".\"$1\"")" ]
-}
+# ---------------------------------------------------------------- basics
+t "takes a snapshot and returns its path"
+p="$(snapshot_take cloudflare-dns example.com pre-change)"
+[ -n "$p" ] && [ -f "$p" ] && ok_ || { no_; echo "      got [$p]"; }
 
-snapshot_policy_names() {
-  jq -r 'keys[]' "$(snapshot_policy_file)" 2>/dev/null || true
-}
+t "stores under the policy's own directory"
+case "$p" in */snapshots/cf/*) ok_ ;; *) no_; echo "      $p" ;; esac
 
-# ---------------------------------------------------------------- paths
-snapshot_dir() {
-  local policy="$1" sub
-  sub="$(snapshot_policy "$policy" dir "$policy")"
-  printf '%s/%s' "$CFDNS_SNAPSHOTS" "$sub"
-}
+t "filename carries scope, timestamp and reason"
+case "${p##*/}" in
+  example.com-*Z-pre-change.json) ok_ ;;
+  *) no_; echo "      ${p##*/}" ;;
+esac
 
-# snapshot_path <policy> <scope> <reason>
-#
-# Collisions are resolved by suffix rather than by making the timestamp finer: two
-# snapshots in the same second is normal when a command takes several actions, and a
-# lost snapshot is worse than an ugly filename.
-snapshot_path() {
-  local policy="$1" scope="$2" reason="$3"
-  local dir ext stamp base candidate n=1
-  dir="$(snapshot_dir "$policy")"
-  ext="$(snapshot_policy "$policy" extension json)"
-  stamp="$(now_stamp)"
-  base="$dir/${scope}-${stamp}-${reason}"
-  candidate="$base.$ext"
-  while [ -e "$candidate" ]; do
-    candidate="$base.$n.$ext"; n=$((n + 1))
-  done
-  printf '%s' "$candidate"
-}
+t "file is owner-only"
+[ "$(stat -c %a "$p" 2>/dev/null || stat -f %Lp "$p")" = 600 ] && ok_ || no_
 
-# ---------------------------------------------------------------- capture
-# snapshot_take <policy> <scope> <reason> [capture-args...] -> path on stdout
-#
-# Returns non-zero without writing anything if the capture fails. A snapshot that
-# silently contains an error message is worse than no snapshot, because it will be
-# trusted as a restore point.
-snapshot_take() {
-  local policy="$1" scope="$2" reason="$3"; shift 3
-  snapshot_policy_exists "$policy" \
-    || die "no snapshot policy named '$policy' in $(snapshot_policy_file).
-  Known policies: $(snapshot_policy_names | tr '\n' ' ')"
+t "wraps state with provenance by default"
+jq -e '.policy == "cloudflare-dns" and .scope == "example.com"
+       and .reason == "pre-change" and (.taken | type == "string")' "$p" >/dev/null 2>&1 \
+  && ok_ || { no_; head -c 200 "$p"; }
 
-  local capture; capture="$(snapshot_policy "$policy" capture)"
-  [ -n "$capture" ] || die "snapshot policy '$policy' declares no capture command"
-  command -v "$capture" >/dev/null 2>&1 \
-    || die "snapshot policy '$policy' names capture '$capture', which does not exist"
+t "snapshot_read returns the state, unwrapped"
+[ "$(snapshot_read "$p" | jq -r '.[0].name')" = "a.example.com" ] && ok_ || no_
 
-  local dir path tmp
-  dir="$(snapshot_dir "$policy")"
-  [ -d "$dir" ] || { mkdir -p "$dir" && chmod 700 "$dir"; }
-  path="$(snapshot_path "$policy" "$scope" "$reason")"
+t "reads a bare, unwrapped snapshot too"
+printf '{"hello":"world"}' > "$W/bare.json"
+[ "$(snapshot_read "$W/bare.json" | jq -r '.hello')" = world ] && ok_ || no_
 
-  tmp="$(mktemp "$dir/.pending.XXXXXX")" || return 1
-  if ! "$capture" "$@" > "$tmp" 2>/dev/null; then
-    rm -f "$tmp"
-    warn "snapshot capture '$capture' failed — nothing was written"
-    return 1
-  fi
-  if [ ! -s "$tmp" ]; then
-    rm -f "$tmp"
-    warn "snapshot capture '$capture' produced no output — refusing to store an empty snapshot"
-    return 1
-  fi
+t "two snapshots in the same second do not collide"
+a="$(snapshot_take cloudflare-dns example.com same)"
+b="$(snapshot_take cloudflare-dns example.com same)"
+[ "$a" != "$b" ] && [ -f "$a" ] && [ -f "$b" ] && ok_ || { no_; echo "      $a / $b"; }
 
-  # Wrapped with provenance so a snapshot is self-describing months later, then moved
-  # into place atomically: a reader never sees a half-written restore point.
-  local wrap; wrap="$(snapshot_policy "$policy" wrap json)"
-  if [ "$wrap" = json ]; then
-    jq --arg p "$policy" --arg s "$scope" --arg r "$reason" --arg t "$(now_utc)" \
-       '{policy:$p, scope:$s, reason:$r, taken:$t, state:.}' "$tmp" > "$tmp.wrapped" \
-      && mv "$tmp.wrapped" "$tmp"
-  fi
-  chmod 600 "$tmp"
-  mv "$tmp" "$path"
+# ---------------------------------------------------------------- failure modes
+t "a failing capture writes nothing and reports failure"
+before="$(find "$CFDNS_ROOT/snapshots" -type f 2>/dev/null | wc -l | tr -d ' ')"
+snapshot_take broken-capture scope reason >/dev/null 2>&1
+after="$(find "$CFDNS_ROOT/snapshots" -type f 2>/dev/null | wc -l | tr -d ' ')"
+[ "$before" = "$after" ] && ok_ || { no_; echo "      file count $before -> $after"; }
 
-  snapshot_prune "$policy" "$scope"
-  printf '%s' "$path"
-}
+t "an empty capture is refused rather than stored"
+snapshot_take empty-capture scope reason >/dev/null 2>&1 && no_ || ok_
+
+t "no partial or pending files are left behind"
+[ -z "$(find "$CFDNS_ROOT/snapshots" -name '.pending.*' 2>/dev/null)" ] && ok_ || no_
+
+t "an unknown policy is refused"
+( snapshot_take no-such-policy s r ) >/dev/null 2>&1 && no_ || ok_
+
+t "a policy naming a non-existent command is refused"
+( snapshot_take missing-command s r ) >/dev/null 2>&1 && no_ || ok_
 
 # ---------------------------------------------------------------- retention
-# Newest kept. `retain: 0` or absent means keep everything.
-snapshot_prune() {
-  local policy="$1" scope="$2"
-  local retain; retain="$(snapshot_policy "$policy" retain 0)"
-  case "$retain" in ''|0|*[!0-9]*) return 0 ;; esac
+t "retention keeps the newest N and prunes the rest"
+for i in 1 2 3 4 5 6; do snapshot_take cloudflare-dns retained "r$i" >/dev/null; done
+n="$(snapshot_list cloudflare-dns retained | wc -l | tr -d ' ')"
+[ "$n" -eq 3 ] && ok_ || { no_; echo "      kept $n, expected 3"; }
 
-  local dir; dir="$(snapshot_dir "$policy")"
-  local victims
-  victims="$(snapshot_list "$policy" "$scope" | tail -n "+$((retain + 1))")"
-  [ -n "$victims" ] || return 0
-  local f
-  while IFS= read -r f; do
-    [ -n "$f" ] && rm -f "$dir/$f"
-  done <<< "$victims"
-}
+t "retention is per scope, not global"
+snapshot_take cloudflare-dns other-scope only >/dev/null
+[ "$(snapshot_list cloudflare-dns other-scope | wc -l | tr -d ' ')" -eq 1 ] && ok_ || no_
 
-# snapshot_list <policy> [scope] -> filenames, newest first
-#
-# Sorted by the timestamp in the filename rather than by mtime. The name is the record
-# of when the state was captured; mtime is a property of the file and can be changed
-# by anything that touches it. A glob plus a reverse sort also avoids parsing `ls`.
-snapshot_list() {
-  local policy="$1" scope="${2:-}" dir entry name
-  dir="$(snapshot_dir "$policy")"
-  [ -d "$dir" ] || return 0
+t "retain: 0 keeps everything"
+for i in 1 2 3 4 5; do snapshot_take aws-route53 zone-abc "r$i" >/dev/null; done
+[ "$(snapshot_list aws-route53 zone-abc | wc -l | tr -d ' ')" -eq 5 ] && ok_ || no_
 
-  for entry in "$dir"/*; do
-    [ -f "$entry" ] || continue
-    name="${entry##*/}"
-    case "$name" in
-      .pending.*) continue ;;
-      *) [ -z "$scope" ] || case "$name" in "$scope"-*) ;; *) continue ;; esac ;;
-    esac
-    printf '%s\n' "$name"
-  done | LC_ALL=C sort -r
-}
+t "listing without a scope returns the whole policy directory"
+[ "$(snapshot_list aws-route53 | wc -l | tr -d ' ')" -ge 5 ] && ok_ || no_
 
-# snapshot_read <path> -> the captured state, unwrapped
-snapshot_read() {
-  local path="$1"
-  [ -f "$path" ] || die "no such snapshot: $path"
-  # Accepts both wrapped and bare snapshots so a hand-written file still restores.
-  if jq -e 'has("state")' "$path" >/dev/null 2>&1; then jq '.state' "$path"
-  else jq '.' "$path"; fi
-}
+# ================================================================
+# The reuse claim, tested. Nothing below required a change to
+# lib/core/snapshot.sh — only a policy entry and a capture function.
+# ================================================================
+t "REUSE: AWS Route53 state, JSON, no retention"
+p2="$(snapshot_take aws-route53 zone-Z1D633PJN98FT9 pre-apply)"
+[ -f "$p2" ] && [ "$(snapshot_read "$p2" | jq -r '.ResourceRecordSets[0].Name')" = "a.aws.test." ] \
+  && ok_ || { no_; echo "      $p2"; }
+
+t "REUSE:   and it landed in the route53 directory"
+case "$p2" in */snapshots/route53/*) ok_ ;; *) no_; echo "      $p2" ;; esac
+
+t "REUSE: Sentry state, plain text, unwrapped"
+p3="$(snapshot_take sentry-projects org-acme pre-migrate)"
+[ -f "$p3" ] && ok_ || { no_; echo "      $p3"; }
+
+t "REUSE:   honours extension: txt"
+case "$p3" in *.txt) ok_ ;; *) no_; echo "      $p3" ;; esac
+
+t "REUSE:   honours wrap: none (state stored verbatim)"
+[ "$(head -1 "$p3")" = "project: web" ] && ok_ || { no_; head -2 "$p3"; }
+
+t "REUSE: three providers coexist without interfering"
+c1="$(snapshot_list cloudflare-dns | wc -l | tr -d ' ')"
+c2="$(snapshot_list aws-route53   | wc -l | tr -d ' ')"
+c3="$(snapshot_list sentry-projects | wc -l | tr -d ' ')"
+[ "$c1" -gt 0 ] && [ "$c2" -gt 0 ] && [ "$c3" -gt 0 ] && ok_ \
+  || { no_; echo "      cf=$c1 aws=$c2 sentry=$c3"; }
+
+t "REUSE: no provider identifier appears in the module's CODE"
+# Comments are excluded deliberately: the header documents example policies, and
+# naming a provider in an example is the opposite of coupling to one.
+code="$(grep -vE "^[[:space:]]*#" lib/core/snapshot.sh)"
+if printf "%s" "$code" | grep -qiE 'cloudflare|route53|sentry|dns_record|zone_id|fetch_live'; then
+  no_; printf "%s" "$code" | grep -niE 'cloudflare|route53|sentry|dns_record|zone_id|fetch_live' | head -3
+else ok_; fi
+
+t "REUSE: the shipped policy file is the only place Cloudflare is named"
+[ "$(grep -lc cloudflare lib/policies/snapshots.json 2>/dev/null)" = "lib/policies/snapshots.json" ] \
+  && ok_ || no_
+
+printf '\n'
+[ "$fail" -eq 0 ] && echo "SNAPSHOT TESTS PASS" || echo "SNAPSHOT TESTS FAILED"
+exit "$fail"

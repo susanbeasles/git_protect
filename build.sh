@@ -1,150 +1,169 @@
 #!/usr/bin/env bash
-# Reproducibility and tamper-sensitivity of scripts/build.sh.
-set +e
-SRC="$(cd "$(dirname "$0")/.." || exit 1; pwd -P)"
-W="/tmp/cfez-build-$$"; mkdir -p "$W"
-trap 'rm -rf "$W"; cp -f "$W/log.bak" "$SRC/lib/core/log.sh" 2>/dev/null' EXIT
-fail=0
-t() { printf '  %-52s ' "$1"; }
-ok_() { echo PASS; }
-no_() { echo FAIL; fail=1; }
+# Build the distributable artifacts.
+#
+# Reproducible by construction: the tarball is built with a fixed mtime, fixed
+# uid/gid, fixed sort order, and no gzip timestamp. Building the same commit twice
+# — on any runner, at any time — must produce byte-identical output, because the
+# whole release model depends on the artifact from the PR build being the same one
+# attached to the release.
+#
+#   scripts/build.sh --version 1.4.0 [--out dist] [--commit <sha>]
+#   scripts/build.sh --verify dist    re-build and confirm checksums match
+set -euo pipefail
 
-build() { ( umask "$1"; cd "${3:-$SRC}" && "$SRC/scripts/build.sh" --version 1.0.0 --commit fixedsha --out "$2" >/dev/null 2>&1 ); awk '/tar.gz/{print $1}' "$2/SHA256SUMS" 2>/dev/null; }
+ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd -P)"
+OUT="$ROOT/dist"
+VERSION=""
+COMMIT=""
+VERIFY=""
 
-h1="$(build 022 "$W/a")"
-t "build produces a tarball and checksums"
-[ -n "$h1" ] && ok_ || { no_; echo "      no checksum produced"; }
+while [ $# -gt 0 ]; do
+  case "$1" in
+    --version) VERSION="$2"; shift 2 ;;
+    --out)     OUT="$2"; shift 2 ;;
+    --commit)  COMMIT="$2"; shift 2 ;;
+    --verify)  VERIFY="$2"; shift 2 ;;
+    *) echo "build.sh: unknown argument '$1'" >&2; exit 2 ;;
+  esac
+done
 
-sleep 2
-h2="$(build 022 "$W/b")"
-t "identical across wall-clock time"
-[ "$h1" = "$h2" ] && ok_ || { no_; echo "      $h1 vs $h2"; }
+die() { printf 'build: %s\n' "$*" >&2; exit 1; }
+say() { printf '  %s\n' "$*"; }
+_sha_file() {
+  if command -v sha256sum >/dev/null 2>&1; then sha256sum "$1" | awk '{print $1}'
+  else shasum -a 256 "$1" | awk '{print $1}'; fi
+}
 
-h3="$(build 077 "$W/c")"
-t "identical across umask"
-[ "$h1" = "$h3" ] && ok_ || { no_; echo "      $h1 vs $h3"; }
+# The payload is defined in payload.txt, not here. A list embedded in the build
+# script drifts silently whenever a module is added; a manifest can be diffed
+# against the checkout, and test/build.sh does exactly that.
+PAYLOAD_MANIFEST="${PAYLOAD_MANIFEST:-$ROOT/payload.txt}"
+[ -f "$PAYLOAD_MANIFEST" ] || die "no payload manifest at $PAYLOAD_MANIFEST"
+PAYLOAD=()
+while IFS= read -r line; do
+  case "$line" in ''|\#*) continue ;; esac
+  PAYLOAD+=("$line")
+done < "$PAYLOAD_MANIFEST"
+[ "${#PAYLOAD[@]}" -gt 0 ] || die "$PAYLOAD_MANIFEST lists no files"
 
-h4="$(build 002 "$W/d" /tmp)"
-t "identical across working directory"
-[ "$h1" = "$h4" ] && ok_ || { no_; echo "      $h1 vs $h4"; }
+EXECUTABLE=(cf)
 
-t "self-verify passes on a clean tree"
-"$SRC/scripts/build.sh" --verify "$W/a" >/dev/null 2>&1 && ok_ || no_
+# ---------------------------------------------------------------- verify mode
+if [ -n "$VERIFY" ]; then
+  [ -f "$VERIFY/SHA256SUMS" ] || die "no SHA256SUMS in $VERIFY"
+  VERSION="$(sed -n 's/^version: //p' "$VERIFY/MANIFEST.txt" 2>/dev/null)"
+  [ -n "$VERSION" ] || die "cannot read version from $VERIFY/MANIFEST.txt"
+  # The commit is stamped into VERSION inside the tarball, so it is part of the
+  # artifact's identity and must be replayed too. Omitting it made the verifier
+  # compare a build of commit X against a build of HEAD.
+  RECORDED_COMMIT="$(sed -n 's/^commit: //p' "$VERIFY/MANIFEST.txt" 2>/dev/null)"
+  [ -n "$RECORDED_COMMIT" ] || die "cannot read commit from $VERIFY/MANIFEST.txt"
+  TMP="$(mktemp -d)"
+  trap 'rm -rf "$TMP"' EXIT
+  "$0" --version "$VERSION" --commit "$RECORDED_COMMIT" --out "$TMP" >/dev/null
+  if diff -u "$VERIFY/SHA256SUMS" "$TMP/SHA256SUMS"; then
+    say "reproducible: rebuild matches $VERIFY/SHA256SUMS"
+    exit 0
+  fi
+  # Distinguish the two failure modes: identical content built with a different
+  # version or commit is a metadata difference, not a reproducibility failure.
+  a="$(sed -n 's/^payload_sha256: //p' "$VERIFY/MANIFEST.txt" 2>/dev/null)"
+  b="$(sed -n 's/^payload_sha256: //p' "$TMP/MANIFEST.txt" 2>/dev/null)"
+  if [ -n "$a" ] && [ "$a" = "$b" ]; then
+    die "payload content matches but the archive differs — check version/commit stamping, not the source tree"
+  fi
+  die "NOT reproducible — the payload content itself differs from the recorded build"
+fi
 
-t "manifest records version, commit and tarball hash"
-grep -q '^version: 1.0.0' "$W/a/MANIFEST.txt" \
-  && grep -q '^commit: fixedsha' "$W/a/MANIFEST.txt" \
-  && grep -q "^tarball_sha256: $h1" "$W/a/MANIFEST.txt" && ok_ || no_
+[ -n "$VERSION" ] || die "--version is required"
+printf '%s' "$VERSION" | grep -qE '^[0-9]+\.[0-9]+\.[0-9]+$' \
+  || die "version must be MAJOR.MINOR.PATCH, got '$VERSION'"
 
-t "per-file manifest lists every payload file"
-n="$(grep -c . "$W/a/FILES.sha256")"
-[ "$n" -ge 38 ] && ok_ || { no_; echo "      only $n files"; }
+cd "$ROOT"
+[ -z "$COMMIT" ] && COMMIT="$(git rev-parse HEAD 2>/dev/null || echo unknown)"
 
-t "VERSION is excluded from FILES.sha256 (it holds the commit)"
-grep -q 'VERSION' "$W/a/FILES.sha256" && { no_; echo "      VERSION should not be listed"; } || ok_
+for f in "${PAYLOAD[@]}"; do
+  [ -f "$f" ] || die "payload file missing: $f  (update PAYLOAD in scripts/build.sh)"
+done
 
-cp "$SRC/lib/core/log.sh" "$W/log.bak"
-echo '# injected' >> "$SRC/lib/core/log.sh"
-t "self-verify FAILS when a payload file changes"
-"$SRC/scripts/build.sh" --verify "$W/a" >/dev/null 2>&1 && { no_; } || ok_
-cp "$W/log.bak" "$SRC/lib/core/log.sh"
+NAME="cfezcli"
+STAGE="$(mktemp -d)"
+trap 'rm -rf "$STAGE"' EXIT
+PKGROOT="$STAGE/$NAME-$VERSION"
+mkdir -p "$PKGROOT"
 
-t "self-verify passes again once restored"
-"$SRC/scripts/build.sh" --verify "$W/a" >/dev/null 2>&1 && ok_ || no_
+say "staging $(printf '%s' "${#PAYLOAD[@]}") payload files"
+for f in "${PAYLOAD[@]}"; do
+  mkdir -p "$PKGROOT/$(dirname "$f")"
+  cp "$f" "$PKGROOT/$f"
+  chmod 644 "$PKGROOT/$f"
+done
+for f in "${EXECUTABLE[@]}"; do chmod 755 "$PKGROOT/$f"; done
 
-t "a missing payload file is reported, not silently skipped"
-mv "$SRC/lib/parse/email.mjs" "$W/email.hold"
-out="$("$SRC/scripts/build.sh" --version 1.0.0 --out "$W/e" 2>&1)"
-echo "$out" | grep -q 'payload file missing' && ok_ || { no_; echo "$out" | tail -2; }
-mv "$W/email.hold" "$SRC/lib/parse/email.mjs"
+# Normalise directory modes explicitly. mkdir -p honours the caller's umask, so
+# without this the tarball's directory entries differ between a developer running
+# umask 022 and a hardened runner running umask 077 — and the build stops being
+# reproducible for a reason that has nothing to do with the code.
+find "$PKGROOT" -type d -exec chmod 755 {} +
 
-t "a bad version string is rejected"
-out="$("$SRC/scripts/build.sh" --version 1.2 --out "$W/f" 2>&1)"
-echo "$out" | grep -q 'MAJOR.MINOR.PATCH' && ok_ || no_
+# Stamp the version so `cf --version` matches the release it came from, and so a
+# user can tell what they are running without trusting the filename.
+cat > "$PKGROOT/VERSION" <<EOF
+version: $VERSION
+commit: $COMMIT
+EOF
+chmod 644 "$PKGROOT/VERSION"
 
+mkdir -p "$OUT"
+rm -f "$OUT/$NAME-$VERSION.tar.gz" "$OUT/SHA256SUMS" "$OUT/MANIFEST.txt"
 
-# ---- the payload manifest must match the shipped modules ----
-t "every module in lib/cli/modules.txt is in payload.txt"
-missing=""
-while IFS= read -r m; do
-  case "$m" in ''|\#*) continue ;; esac
-  grep -qxF "lib/$m" "$SRC/payload.txt" || missing="$missing lib/$m"
-done < "$SRC/lib/cli/modules.txt"
-[ -z "$missing" ] && ok_ || { no_; echo "      missing:$missing"; }
+# Reproducibility: fixed mtime, fixed ownership, sorted names, gzip -n (no
+# timestamp in the gzip header).
+say "creating reproducible tarball"
+# GNU tar is positional: options must precede --files-from, and --no-recursion
+# must come before it too or it is silently ignored.
+( cd "$STAGE" && \
+  find "$NAME-$VERSION" -print0 | LC_ALL=C sort -z | \
+  tar --create --file - \
+      --mtime='2020-01-01 00:00:00 UTC' \
+      --owner=0 --group=0 --numeric-owner \
+      --format=gnu \
+      --no-recursion \
+      --null --files-from - ) | gzip -n -9 > "$OUT/$NAME-$VERSION.tar.gz"
 
-t "every file in payload.txt exists in the checkout"
-missing=""
-while IFS= read -r f; do
-  case "$f" in ''|\#*) continue ;; esac
-  [ -f "$SRC/$f" ] || missing="$missing $f"
-done < "$SRC/payload.txt"
-[ -z "$missing" ] && ok_ || { no_; echo "      missing:$missing"; }
+# Per-file hashes: lets a reviewer diff a release against a checkout without
+# unpacking anything, and lets `cf integrity` be cross-checked against a release.
+say "computing per-file manifest"
+( cd "$PKGROOT" && find . -type f -not -name VERSION | LC_ALL=C sort \
+    | xargs sha256sum | sed 's#\./##' ) > "$OUT/FILES.sha256"
 
-t "the built tarball contains every module the loader will source"
-T="$W/loadcheck"; mkdir -p "$T"
-tar xzf "$W/a/cfezcli-1.0.0.tar.gz" -C "$T"
-D="$T/cfezcli-1.0.0"
-missing=""
-while IFS= read -r m; do
-  case "$m" in ''|\#*) continue ;; esac
-  [ -f "$D/lib/$m" ] || missing="$missing $m"
-done < "$D/lib/cli/modules.txt"
-[ -z "$missing" ] && ok_ || { no_; echo "      missing from tarball:$missing"; }
+( cd "$OUT" && sha256sum "$NAME-$VERSION.tar.gz" "FILES.sha256" > SHA256SUMS )
 
-# ---- the release-gate invariant ----
-# The release cross-check compares payload_sha256, not the tarball hash. These
-# assertions are what make that safe; if they fail, concurrent pull requests will
-# either block releases or produce a partial state.
-t "payload_sha256 is recorded in the manifest"
-p1="$(sed -n 's/^payload_sha256: //p' "$W/a/MANIFEST.txt")"
-[ -n "$p1" ] && ok_ || no_
+TARBALL_SHA="$(awk -v f="$NAME-$VERSION.tar.gz" '$2 == f {print $1}' "$OUT/SHA256SUMS")"
 
-t "payload_sha256 is INDEPENDENT of the version"
-build 022 "$W/pv" >/dev/null
-"$SRC/scripts/build.sh" --version 7.7.7 --commit fixedsha --out "$W/pv2" >/dev/null 2>&1
-p2="$(sed -n 's/^payload_sha256: //p' "$W/pv2/MANIFEST.txt")"
-[ "$p1" = "$p2" ] && ok_ || { no_; echo "      $p1 vs $p2"; }
+# The digest of the per-file manifest. This identifies the PAYLOAD CONTENT and
+# nothing else — not the version, not the commit, not the archive framing.
+#
+# It matters because the tarball's own hash is version- and commit-dependent: the
+# version appears in the directory name inside the archive, and the commit is
+# stamped into VERSION. So "does the release artifact match the tested artifact?"
+# cannot be answered by comparing tarball hashes unless the version and commit are
+# guaranteed identical, which they are not when two pull requests are open at once.
+# payload_sha256 is the invariant that actually means "this is the tree that passed".
+PAYLOAD_SHA="$(_sha_file "$OUT/FILES.sha256")"
 
-t "payload_sha256 is INDEPENDENT of the commit"
-"$SRC/scripts/build.sh" --version 1.0.0 --commit totallydifferent --out "$W/pc" >/dev/null 2>&1
-p3="$(sed -n 's/^payload_sha256: //p' "$W/pc/MANIFEST.txt")"
-[ "$p1" = "$p3" ] && ok_ || { no_; echo "      $p1 vs $p3"; }
+cat > "$OUT/MANIFEST.txt" <<EOF
+name: $NAME
+version: $VERSION
+commit: $COMMIT
+tarball: $NAME-$VERSION.tar.gz
+tarball_sha256: $TARBALL_SHA
+payload_sha256: $PAYLOAD_SHA
+files: ${#PAYLOAD[@]}
+build_reproducible: yes (fixed mtime, uid/gid 0, sorted, gzip -n)
+EOF
 
-t "tarball hash DOES change with the version (why we cannot compare it)"
-h_a="$(awk '/tar.gz/{print $1}' "$W/a/SHA256SUMS")"
-h_b="$(awk '/tar.gz/{print $1}' "$W/pv2/SHA256SUMS")"
-[ "$h_a" != "$h_b" ] && ok_ || { no_; echo "      expected these to differ"; }
-
-t "payload_sha256 DOES change when a payload file changes"
-cp "$SRC/lib/core/log.sh" "$W/log.bak2"
-echo '# injected' >> "$SRC/lib/core/log.sh"
-"$SRC/scripts/build.sh" --version 1.0.0 --commit fixedsha --out "$W/pt" >/dev/null 2>&1
-p4="$(sed -n 's/^payload_sha256: //p' "$W/pt/MANIFEST.txt")"
-cp "$W/log.bak2" "$SRC/lib/core/log.sh"
-[ "$p1" != "$p4" ] && ok_ || { no_; echo "      tamper did not change the payload digest"; }
-
-t "--verify distinguishes a metadata difference from a content difference"
-out="$("$SRC/scripts/build.sh" --verify "$W/a" 2>&1)"
-echo "$out" | grep -q 'reproducible' && ok_ || { no_; echo "$out" | tail -3; }
-
-# ---- macOS package payload shape (logic testable off macOS) ----
-t "pkg payload script produces the expected tree"
-R="$W/pkgroot"; INSTALL_LOCATION=/usr/local/lib/cfezcli
-mkdir -p "$R$INSTALL_LOCATION"
-tar xzf "$W/a/cfezcli-1.0.0.tar.gz" -C "$W"
-cp -R "$W/cfezcli-1.0.0/." "$R$INSTALL_LOCATION/"
-find "$R$INSTALL_LOCATION" -type d -exec chmod 755 {} +
-find "$R$INSTALL_LOCATION" -type f -exec chmod 644 {} +
-chmod 755 "$R$INSTALL_LOCATION/cf"
-if [ -x "$R$INSTALL_LOCATION/cf" ] && [ -f "$R$INSTALL_LOCATION/lib/core/log.sh" ]; then ok_; else no_; fi
-
-t "pkg payload has nothing group- or world-writable"
-bad="$(find "$R" -perm /022 2>/dev/null)"
-[ -z "$bad" ] && ok_ || { no_; echo "$bad" | head -3; }
-
-t "cf runs from the pkg payload location"
-CFDNS_ROOT="$W/pkgstate" "$R$INSTALL_LOCATION/cf" --help >/dev/null 2>&1 && ok_ || no_
-
-printf '\n'
-[ "$fail" -eq 0 ] && echo "BUILD TESTS PASS" || echo "BUILD TESTS FAILED"
-exit "$fail"
+say "artifacts in $OUT:"
+( cd "$OUT" && ls -1 ) | sed 's/^/    /'
+say "tarball sha256: $TARBALL_SHA"
+say "payload sha256: $PAYLOAD_SHA  (content only — version and commit independent)"

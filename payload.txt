@@ -1,0 +1,70 @@
+# Files that constitute a release, one per line.
+#
+# Data rather than a bash array: a release payload defined in code drifts
+# silently when a module is added, and cannot be diffed against the tree.
+# scripts/build.sh fails if any line here is missing from the checkout, and
+# test/build.sh fails if a shipped module is missing from this file.
+
+# entry point and metadata
+cf
+README.md
+LICENSE
+lib/cli/modules.txt
+
+# shell modules, in load order (see lib/cli/modules.txt)
+lib/core/log.sh
+lib/core/paths.sh
+lib/core/time.sh
+lib/core/json.sh
+lib/core/snapshot.sh
+lib/core/seal.sh
+lib/core/retry.sh
+lib/core/secret.sh
+lib/core/http.sh
+lib/core/node.sh
+lib/integrity/bundle.sh
+lib/integrity/changelog.sh
+lib/integrity/pin.sh
+lib/integrity/banner.sh
+lib/dns/record.sh
+lib/dns/query.sh
+lib/dns/select.sh
+lib/dns/patch.sh
+lib/dns/desired.sh
+lib/dns/mutate.sh
+lib/analysis/run.sh
+lib/analysis/report.sh
+lib/analysis/gate.sh
+lib/cli/usage.sh
+lib/cli/args.sh
+lib/cmd/auth.sh
+lib/cmd/dns.sh
+lib/cmd/integrity.sh
+lib/cmd/seal.sh
+lib/cmd/doctor.sh
+
+# policy configuration (drives the snapshot primitive)
+lib/policies/snapshots.json
+
+# jq modules
+lib/dns/plan.jq
+lib/dns/api_body.jq
+
+# node analyzer
+lib/analyze.mjs
+lib/report.mjs
+lib/resolve.mjs
+lib/findings.mjs
+lib/records.mjs
+lib/parse/spf.mjs
+lib/parse/dmarc.mjs
+lib/parse/dkim.mjs
+lib/parse/email.mjs
+lib/checks/index.mjs
+lib/checks/spf.mjs
+lib/checks/dmarc.mjs
+lib/checks/dkim.mjs
+lib/checks/mail.mjs
+lib/checks/mx.mjs
+lib/checks/zone.mjs
+lib/checks/transport.mjs

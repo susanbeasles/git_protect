@@ -1,0 +1,13 @@
+{
+  "zone": "sonarmd.com",
+  "records": [
+    {"name":"sonarmd.com","type":"TXT","content":"v=spf1 include:spfa.cpmails.com include:spf.protection.outlook.com include:spf.emailsignatures365.com include:spf.ess.barracudanetworks.com -all","ttl":300,"proxied":false,"comment":"root SPF - proofpoint removed, under 10 lookups","tags":["email","spf"]},
+    {"name":"_dmarc.sonarmd.com","type":"TXT","content":"v=DMARC1; p=quarantine; sp=quarantine; adkim=r; aspf=r; pct=100; rua=mailto:rua+sonarmd.com@dmarc.barracudanetworks.com","ttl":300,"proxied":false,"comment":"single record - was duplicated = no policy","tags":["email","dmarc"]},
+    {"name":"stg.info.sonarmd.com","type":"TXT","content":"v=spf1 include:mailgun.org ~all","ttl":300,"proxied":false,"comment":"","tags":["email","spf"]},
+    {"name":"info.sonarmd.com","type":"TXT","content":"v=spf1 include:mailgun.org ~all","ttl":1,"proxied":false,"comment":"","tags":["email","spf"]},
+    {"name":"nm.sonarmd.com","type":"TXT","content":"v=spf1 include:nm.nutshellemail.com ~all","ttl":1,"proxied":false,"comment":"","tags":["email","spf"]},
+    {"name":"mail.sonarmd.com","type":"TXT","content":"v=spf1 include:mailgun.org ~all","ttl":300,"proxied":false,"comment":"ADDED - had MX but no SPF","tags":["email","spf"]},
+    {"name":"stg.mail.sonarmd.com","type":"TXT","content":"v=spf1 include:mailgun.org ~all","ttl":300,"proxied":false,"comment":"ADDED - had MX but no SPF","tags":["email","spf"]},
+    {"name":"mg.mail.sonarmd.com","type":"TXT","content":"v=spf1 include:mailgun.org ~all","ttl":300,"proxied":false,"comment":"ADDED - had MX but no SPF","tags":["email","spf"]}
+  ]
+}
