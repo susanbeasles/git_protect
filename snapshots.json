@@ -1,0 +1,10 @@
+{
+  "cloudflare-dns": {
+    "capture": "fetch_live",
+    "dir": "cloudflare-dns",
+    "extension": "json",
+    "wrap": "json",
+    "retain": 100,
+    "description": "Every DNS record in the zone, taken before any mutation."
+  }
+}

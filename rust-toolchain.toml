@@ -1,0 +1,6 @@
+# Pinned so a developer's machine and CI agree about which lints exist. An unpinned
+# toolchain means `cargo clippy` passing locally says nothing about CI.
+[toolchain]
+channel    = "1.83"
+components = ["clippy", "rustfmt"]
+targets    = ["x86_64-unknown-linux-gnu", "aarch64-apple-darwin", "x86_64-apple-darwin"]

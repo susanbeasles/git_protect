@@ -1,0 +1,44 @@
+# Load order. Data, not code, so the dependency direction is inspectable without
+# reading a shell script. Each layer may use the layers above it and nothing below.
+#
+# core      no knowledge of DNS, integrity, or the CLI
+core/log.sh
+core/paths.sh
+core/time.sh
+core/json.sh
+core/snapshot.sh
+core/seal.sh
+core/retry.sh
+core/secret.sh
+core/http.sh
+core/node.sh
+#
+# integrity self-verification of this bundle; uses core only
+integrity/bundle.sh
+integrity/changelog.sh
+integrity/pin.sh
+integrity/banner.sh
+#
+# dns       records, selection, planning, mutation; uses core only
+dns/record.sh
+dns/query.sh
+dns/select.sh
+dns/patch.sh
+dns/desired.sh
+dns/mutate.sh
+#
+# analysis  the boundary to the Node analyzer; uses core
+analysis/run.sh
+analysis/report.sh
+analysis/gate.sh
+#
+# cli       argument parsing and help
+cli/usage.sh
+cli/args.sh
+#
+# cmd       orchestration only; composes everything above
+cmd/auth.sh
+cmd/dns.sh
+cmd/integrity.sh
+cmd/seal.sh
+cmd/doctor.sh

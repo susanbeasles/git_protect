@@ -1,0 +1,43 @@
+[package]
+name          = "cfez"
+version       = "0.1.0"
+edition       = "2021"
+rust-version  = "1.75"
+description   = "Cloudflare DNS management with email-authentication analysis"
+license       = "MIT"
+
+[[bin]]
+name = "cf"
+path = "src/main.rs"
+
+# Dependencies are deliberately few. Every crate is review burden and supply-chain
+# surface, and this tool holds a credential that can rewrite a production zone.
+#
+#   serde/serde_json  the Cloudflare API and every config file are JSON
+#   sha2              bundle hashing; a hand-rolled SHA-256 would be worse
+#
+# The HTTP client sits behind a trait (core::http::HttpClient) so the network is a
+# seam, not a dependency of the logic. That is what lets the whole planning and
+# analysis layer be tested without a socket, and it is why `net` is a feature.
+[dependencies]
+serde      = { version = "1", features = ["derive"] }
+serde_json = "1"
+sha2       = "0.10"
+ureq       = { version = "2.9", optional = true, default-features = false, features = ["tls", "json"] }
+
+[features]
+default = ["net"]
+net     = ["ureq"]
+
+[profile.release]
+# Reproducible and small. codegen-units=1 removes parallel-codegen nondeterminism,
+# which the release gate depends on: the artifact built for a pull request must be
+# byte-identical to the one attached to the release.
+opt-level     = "s"
+lto           = true
+codegen-units = 1
+panic         = "abort"
+strip         = true
+
+[profile.dev]
+panic = "abort"

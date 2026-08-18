@@ -1,0 +1,2 @@
+# Defaults, with one change: a wider line suits code whose comments carry reasoning.
+max_width = 100

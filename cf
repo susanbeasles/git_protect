@@ -1,0 +1,115 @@
+#!/usr/bin/env bash
+# cf — Cloudflare DNS CLI.
+#
+# This file is wiring: find the bundle, load the modules, route the arguments. It
+# contains no behaviour. Every question about what the tool does is answered in lib/.
+#
+#   lib/core/       primitives: output, paths, time, json, retry, secrets, http, node
+#   lib/integrity/  self-verification of this bundle
+#   lib/dns/        records, selection, patching, planning, mutation
+#   lib/analysis/   the boundary to the Node analyzer
+#   lib/cli/        argument parsing and help
+#   lib/cmd/        orchestration only
+#
+# Load order and the permitted dependency direction are in lib/cli/modules.txt.
+# Only lib/dns/mutate.sh writes to Cloudflare; read that file to know what this
+# tool can do to a zone.
+set -euo pipefail
+
+CF_ENTRY="${BASH_SOURCE[0]}"
+
+# Resolve the entry symlink inline. This cannot come from lib/ because lib/ cannot be
+# found until the real bundle path is known; /usr/local/bin/cf is expected to be a
+# symlink into the project checkout.
+__p="$CF_ENTRY"; __n=0
+while [ -L "$__p" ]; do
+  __n=$((__n + 1))
+  [ "$__n" -gt 40 ] && { echo "cf: symlink loop resolving $CF_ENTRY" >&2; exit 1; }
+  __t="$(readlink "$__p")"
+  case "$__t" in /*) __p="$__t" ;; *) __p="$(dirname "$__p")/$__t" ;; esac
+done
+CFDNS_HOME_DIR="$(cd "$(dirname "$__p")" && pwd -P)"
+CFDNS_LIB="$CFDNS_HOME_DIR/lib"
+unset __p __n __t
+
+while IFS= read -r __mod; do
+  case "$__mod" in ''|\#*) continue ;; esac
+  # shellcheck source=/dev/null
+  . "$CFDNS_LIB/$__mod"
+done < "$CFDNS_LIB/cli/modules.txt"
+unset __mod
+
+require_cmd curl
+require_cmd jq
+
+# Routing table. A subcommand maps to exactly one function; the function decides
+# nothing about argument syntax and this table decides nothing about behaviour.
+route_auth() {
+  case "${1:-status}" in
+    login)  cmd_auth_login ;;
+    status) cmd_auth_status ;;
+    logout) cmd_auth_logout ;;
+    *) die "cf auth login|status|logout" ;;
+  esac
+}
+
+route_dns() {
+  case "${1:-}" in
+    ls|list)        cmd_dns_ls ;;
+    add)            cmd_dns_add ;;
+    rm|remove|del)  cmd_dns_rm ;;
+    update|set)     cmd_dns_update ;;
+    sync)           cmd_dns_sync ;;
+    restore)        cmd_dns_restore ;;
+    doctor|analyze) cmd_dns_doctor ;;
+    validate|check) cmd_dns_validate ;;
+    '') die "cf dns ls|add|rm|update|sync|restore|doctor|validate" ;;
+    *)  die "unknown: cf dns $1  (see: cf --help)" ;;
+  esac
+}
+
+main() {
+  local group="${1:-}"; shift || true
+  local sub=""
+  # shellcheck disable=SC2034  # populated by parse_args for future positional args
+  POSITIONAL=()
+
+  case "$group" in ''|-h|--help) usage; exit 0 ;; esac
+
+  # Only these groups take a subcommand.
+  case "$group" in
+    auth|dns|integrity) sub="${1:-}"; shift || true ;;
+  esac
+
+  # `cf seal` must be able to report on a broken seal, so it runs before the banner
+  # would refuse. Everything it prints is derived from the same check.
+  if [ "$group" = seal ]; then
+    parse_args "$@"
+    integrity_check
+    seal_check "$BUNDLE_MANIFEST"
+    cmd_seal
+    exit $?
+  fi
+  parse_args "$@"
+
+  # sync previews by default; the whole point is to inspect a large plan before
+  # applying it. add/rm/update prompt instead, so they need no dry-run mode.
+  # shellcheck disable=SC2034  # read by lib/dns/mutate.sh
+  if [ "$group $sub" = "dns sync" ] && [ -z "${APPLY:-}" ] && [ -z "${SYNC_PULL:-}" ]; then
+    DRY_RUN=1
+  fi
+
+  integrity_banner
+
+  case "$group" in
+    auth)      route_auth "$sub" ;;
+    dns)       route_dns  "$sub" ;;
+    integrity) cmd_integrity "${sub:-show}" ;;
+    seal)      cmd_seal ;;
+    doctor)    cmd_doctor ;;
+    snapshots) zone_snapshot_list | sed 's/^/  /' ;;
+    *) die "unknown command: $group  (see: cf --help)" ;;
+  esac
+}
+
+main "$@"

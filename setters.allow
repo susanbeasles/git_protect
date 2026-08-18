@@ -1,0 +1,14 @@
+# Functions permitted to set caller-visible state.
+#
+# Every entry must print NOTHING, so there is never a reason to call it inside `$( )`.
+# test/purity.sh enforces both halves: nothing else may mutate state, and none of
+# these may write to stdout.
+#
+# function            why it must set rather than return
+integrity_check       populates the bundle hash, scan and pin state that banner.sh and every cmd/ module read; returning eight values through stdout would be worse
+parse_args            its entire job is turning flags into variables
+main                  sets the routing locals and DRY_RUN before dispatch
+
+# memo <function>   caches its own result; no other function reads the variable, so a
+#                   subshell costs a recomputation and never a wrong answer.
+memo zone_name        avoids a jq process per call for a value that cannot change during one invocation

@@ -1,0 +1,22 @@
+{
+  "zone": "sonarmd.com",
+  "records": [
+    {"id":"a1","name":"sonarmd.com","type":"TXT","content":"v=spf1 include:_spf-us.ppe-hosted.com include:spfa.cpmails.com include:spf.protection.outlook.com include:spf.emailsignatures365.com include:spf.ess.barracudanetworks.com -all","ttl":1,"proxied":false,"comment":"","tags":[],"priority":null},
+    {"id":"a2","name":"_dmarc.sonarmd.com","type":"TXT","content":"v=DMARC1; p=quarantine; fo=1; rua=mailto:rua+sonarmd.com@dmarc.barracudanetworks.com; ruf=mailto:ruf+sonarmd.com@dmarc.barracudanetworks.com","ttl":1,"proxied":false,"comment":"","tags":[],"priority":null},
+    {"id":"a3","name":"_dmarc.sonarmd.com","type":"TXT","content":"v=DMARC1; p=quarantine; fo=1; rua=mailto:rua+sonarmd.com@dmarc.barracudanetworks.com; ruf=mailto:ruf+sonarmd.com@dmarc.barracudanetworks.com","ttl":1,"proxied":false,"comment":"dupe","tags":[],"priority":null},
+    {"id":"a4","name":"stg.info.sonarmd.com","type":"TXT","content":"v=spf1 include:mailgun.org ~all","ttl":1,"proxied":false,"comment":"","tags":[],"priority":null},
+    {"id":"a5","name":"stg.info.sonarmd.com","type":"TXT","content":"v=spf1 include:mailgun.org ~all","ttl":1,"proxied":false,"comment":"dupe","tags":[],"priority":null},
+    {"id":"a6","name":"mail.sonarmd.com","type":"MX","content":"mxa.mailgun.org","ttl":1,"proxied":false,"comment":"iterable mx record","tags":[],"priority":10},
+    {"id":"a7","name":"mail.sonarmd.com","type":"MX","content":"mxb.mailgun.org","ttl":1,"proxied":false,"comment":"","tags":[],"priority":10},
+    {"id":"a8","name":"sonarmd.com","type":"MX","content":"d358389a.ess.barracudanetworks.com","ttl":1,"proxied":false,"comment":"","tags":[],"priority":1},
+    {"id":"a9","name":"k1._domainkey.mg.mail.sonarmd.com","type":"TXT","content":"v=DKIM1; k=rsa; p=MIGfMA0GCSqGSIb3DQEBAQUAA4GNADCBiQKBgQC7vbqajDhA8YJIzEnr3b7VZ9nMxYJ0aBqCiTFRxJ1kQZ8tGxAHmYNvVQm3wRZoLpKdFhCxJvBnYqWzTnLmDfEsGhIjKlMnOpQrStUvWxYzAbCdEfGhIjKlMnOpQrStUvWxYzAbCdEfGh1234567890QIDAQAB","ttl":1,"proxied":false,"comment":"","tags":[],"priority":null},
+    {"id":"b1","name":"weak._domainkey.sonarmd.com","type":"TXT","content":"v=DKIM1; k=rsa; p=MFwwDQYJKoZIhvcNAQEBBQADSwAwSAJBAKj34GkxFhD90vcNLYLInFEX6Ppy1tPf9Cnzj4p4WGeKLs1Pt8QuKUpRKfFLfRYC9AIKjbJTWit+CqvjWYzvQwECAwEAAQ==","ttl":1,"proxied":false,"comment":"","tags":[],"priority":null},
+    {"id":"b2","name":"revoked._domainkey.sonarmd.com","type":"TXT","content":"v=DKIM1; k=rsa; p=","ttl":1,"proxied":false,"comment":"","tags":[],"priority":null},
+    {"id":"b3","name":"bad.sonarmd.com","type":"TXT","content":"v=spf1 +all ptr include:foo.example -all include:after.example","ttl":1,"proxied":false,"comment":"","tags":[],"priority":null},
+    {"id":"b4","name":"broken.sonarmd.com","type":"TXT","content":"v=DMARC1; p=maybe; pct=250; adkim=x; fo=9; rua=notanemail","ttl":1,"proxied":false,"comment":"","tags":[],"priority":null},
+    {"id":"b5","name":"app.sonarmd.com","type":"A","content":"203.0.113.42","ttl":1,"proxied":false,"comment":"origin","tags":[],"priority":null},
+    {"id":"b6","name":"old.sonarmd.com","type":"CNAME","content":"nonexistent-bucket-xyz-99887.s3.amazonaws.com","ttl":1,"proxied":false,"comment":"","tags":[],"priority":null},
+    {"id":"b7","name":"verify.sonarmd.com","type":"TXT","content":"google-site-verification=Xy9AbCdEfGhIjKlMnOpQrStUvWxYz0123456789ABCD","ttl":1,"proxied":false,"comment":"","tags":[],"priority":null},
+    {"id":"b8","name":"mx2.sonarmd.com","type":"MX","content":"mail.example.invalid","ttl":1,"proxied":true,"comment":"","tags":[],"priority":null}
+  ]
+}

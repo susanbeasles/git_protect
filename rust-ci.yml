@@ -1,0 +1,102 @@
+name: rust
+
+# The gate for the Rust tree. Everything here must pass before a commit is eligible to
+# reach main, and each step exists because a specific class of defect got through
+# without it.
+
+on:
+  pull_request:
+  workflow_call:
+
+permissions:
+  contents: read
+
+env:
+  CARGO_TERM_COLOR: always
+  # A warning that is not an error is a warning that stays.
+  RUSTFLAGS: "-D warnings"
+
+jobs:
+  check:
+    name: fmt, clippy, test
+    runs-on: ubuntu-24.04
+    steps:
+      - uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683 # v4.2.2
+        with:
+          persist-credentials: false
+
+      - name: Install the pinned toolchain
+        run: |
+          set -euo pipefail
+          # Pinned in rust-toolchain.toml so a local build and CI cannot disagree about
+          # which lints exist.
+          rustup show active-toolchain || rustup toolchain install
+          rustup component add clippy rustfmt
+
+      - name: Formatting
+        run: cargo fmt --all -- --check
+
+      - name: Clippy, at the policy declared in src/lib.rs
+        run: cargo clippy --all-targets --all-features -- -D warnings
+
+      - name: Clippy without the network feature
+        # The logic layer must build and lint with no TLS stack compiled in, or the
+        # network has stopped being a seam and become a dependency.
+        run: cargo clippy --no-default-features --all-targets -- -D warnings
+
+      - name: Tests
+        run: cargo test --all-features
+
+      - name: Tests without the network feature
+        run: cargo test --no-default-features
+
+      - name: Every dependency is accounted for
+        run: |
+          set -euo pipefail
+          # The dependency budget is a design constraint, not an accident. If this count
+          # moves, someone should have to say why in a pull request.
+          count="$(cargo tree --no-default-features --prefix none \
+                   | sed 's/ v.*//' | sort -u | grep -c .)"
+          echo "transitive crates: $count"
+          if [ "$count" -gt 25 ]; then
+            echo "::error::the dependency tree grew to $count crates (budget 25)"
+            cargo tree --no-default-features
+            exit 1
+          fi
+
+      - name: Reproducible release build
+        run: |
+          set -euo pipefail
+          cargo build --release --locked
+          a="$(sha256sum target/release/cf | cut -d' ' -f1)"
+          rm -rf target/release/cf
+          cargo build --release --locked
+          b="$(sha256sum target/release/cf | cut -d' ' -f1)"
+          echo "build 1: $a"
+          echo "build 2: $b"
+          # The release model depends on the artifact built for a pull request being the
+          # same bytes as the one attached to the release.
+          [ "$a" = "$b" ] || { echo "::error::the release build is not reproducible"; exit 1; }
+
+  cross:
+    name: build for ${{ matrix.target }}
+    runs-on: ${{ matrix.os }}
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - { os: ubuntu-24.04, target: x86_64-unknown-linux-gnu }
+          - { os: macos-14, target: aarch64-apple-darwin }
+          - { os: macos-14, target: x86_64-apple-darwin }
+    steps:
+      - uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683 # v4.2.2
+        with:
+          persist-credentials: false
+      - run: rustup target add ${{ matrix.target }}
+      - run: cargo build --release --locked --target ${{ matrix.target }}
+      - run: cargo test --target ${{ matrix.target }}
+      - uses: actions/upload-artifact@b4b15b8c7c6ac21ea08fcf65892d2ee8f75cf882 # v4.4.3
+        with:
+          name: cf-${{ matrix.target }}
+          path: target/${{ matrix.target }}/release/cf
+          if-no-files-found: error
